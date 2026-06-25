@@ -1,0 +1,1 @@
+- [web-ifc 0.0.77 API quirks](web-ifc-api.md) — Dispose() is global teardown; correct geometry/storey API names differ from docs
