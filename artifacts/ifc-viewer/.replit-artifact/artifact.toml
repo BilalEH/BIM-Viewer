@@ -1,0 +1,27 @@
+kind = "web"
+previewPath = "/"
+title = "IFC Viewer"
+version = "1.0.0"
+id = "artifacts/ifc-viewer"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 18257
+
+[services.development]
+run = "pnpm --filter @workspace/ifc-viewer run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/ifc-viewer", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/ifc-viewer/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18257"
+BASE_PATH = "/"
