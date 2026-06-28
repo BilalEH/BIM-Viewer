@@ -8,6 +8,8 @@ import { ModelTree } from '@/components/ModelTree';
 import { PropertiesPanel } from '@/components/PropertiesPanel';
 import { ProjectTimer } from '@/components/ProjectTimer';
 import { SceneOverlay } from '@/components/SceneOverlay';
+import { FpsCounter } from '@/components/FpsCounter';
+import { GraphicsSettingsPanel } from '@/components/GraphicsSettings';
 import {
   ifcManager,
   type IFCSpatialNode,
@@ -15,34 +17,55 @@ import {
   type IFCElementProps,
   type IFCMeshData,
 } from '@/lib/ifc-manager';
-import type { ThreeScene, ViewMode, ToolMode, MeasureInfo, MarkupItem } from '@/lib/three-scene';
+import type {
+  ThreeScene,
+  ViewMode,
+  ToolMode,
+  MeasureInfo,
+  MarkupItem,
+  GraphicsSettings,
+} from '@/lib/three-scene';
 
 export default function Home() {
   const sceneRef = useRef<ThreeScene | null>(null);
-  const pendingMeshesRef = useRef<IFCMeshData[] | null>(null);
+  const pendingMeshesRef    = useRef<IFCMeshData[]>([]);
+  const loadCompleteRef     = useRef(false);  // tracks whether loadBuffer() resolved while scene wasn't ready yet
 
   // ── Core state ─────────────────────────────────────────────────
-  const [hasModel, setHasModel] = useState(false);
-  const [loading, setLoading]   = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [error, setError]       = useState<string | null>(null);
+  const [hasModel, setHasModel]   = useState(false);
+  const [loading, setLoading]     = useState(false);
+  const [progress, setProgress]   = useState(0);
+  const [error, setError]         = useState<string | null>(null);
 
   // ── Camera / view state ────────────────────────────────────────
-  const [viewMode, setViewMode] = useState<ViewMode>('perspective');
+  const [viewMode, setViewMode]   = useState<ViewMode>('perspective');
   const [activeTool, setActiveTool] = useState<ToolMode>('orbit');
 
   // ── Model data ─────────────────────────────────────────────────
-  const [storeys, setStoreys] = useState<IFCStorey[]>([]);
-  const [tree, setTree]       = useState<IFCSpatialNode | null>(null);
+  const [storeys, setStoreys]     = useState<IFCStorey[]>([]);
+  const [tree, setTree]           = useState<IFCSpatialNode | null>(null);
   const [clipElevation, setClipElevation] = useState<number | null>(null);
 
-  // ── Selection state ────────────────────────────────────────────
+  // ── Selection ──────────────────────────────────────────────────
   const [selectedID, setSelectedID]       = useState(-1);
   const [selectedProps, setSelectedProps] = useState<IFCElementProps | null>(null);
 
-  // ── Panel state ────────────────────────────────────────────────
-  const [showTree, setShowTree]   = useState(true);
-  const [showTimer, setShowTimer] = useState(false);
+  // ── Panels ─────────────────────────────────────────────────────
+  const [showTree, setShowTree]         = useState(true);
+  const [showTimer, setShowTimer]       = useState(false);
+  const [showFps, setShowFps]           = useState(false);
+  const [showGfxSettings, setShowGfxSettings] = useState(false);
+
+  // ── FPS ────────────────────────────────────────────────────────
+  const [fps, setFps] = useState(0);
+
+  // ── Graphics settings ──────────────────────────────────────────
+  const [gfxSettings, setGfxSettings] = useState<GraphicsSettings>({
+    quality: 'high',
+    wireframe: false,
+    flatShading: false,
+    showGrid: true,
+  });
 
   // ── Explode ────────────────────────────────────────────────────
   const [explodeScale, setExplodeScale] = useState(0);
@@ -53,20 +76,36 @@ export default function Home() {
   });
 
   // ── Markup ─────────────────────────────────────────────────────
-  const [markups, setMarkups]               = useState<MarkupItem[]>([]);
+  const [markups, setMarkups]                   = useState<MarkupItem[]>([]);
   const [pendingMarkupPos, setPendingMarkupPos] = useState<THREE.Vector3 | null>(null);
 
-  // ── Scene ready callback (flush pending meshes) ────────────────
+  // ── 2D plan ────────────────────────────────────────────────────
+  const [is2DPlan, setIs2DPlan] = useState(false);
+
+  // ── Construction simulation ────────────────────────────────────
+  const [isSimulating, setIsSimulating]     = useState(false);
+  const [simStep, setSimStep]               = useState(0);
+  const [simTotal, setSimTotal]             = useState(0);
+  const [simStoreyName, setSimStoreyName]   = useState('');
+
+  // ── Scene ready — flush pending meshes ─────────────────────────
   const onSceneReady = useCallback((scene: ThreeScene) => {
-    if (pendingMeshesRef.current) {
-      scene.addMeshes(pendingMeshesRef.current);
-      pendingMeshesRef.current = null;
+    const pending = pendingMeshesRef.current;
+    if (pending.length) {
+      pending.forEach(m => scene.queueMesh(m));
+      pendingMeshesRef.current = [];
+    }
+    // If loadBuffer() already resolved while the canvas was still mounting,
+    // signal finalizeLoad() now so fitCamera() and explode-data get computed.
+    if (loadCompleteRef.current) {
+      scene.finalizeLoad();
+      loadCompleteRef.current = false;
     }
   }, []);
 
   // ── Pre-init IFC WASM ──────────────────────────────────────────
   useEffect(() => {
-    ifcManager.init().catch(() => {/* silent */});
+    ifcManager.init().catch(() => {/* silent — retried on load */});
   }, []);
 
   // ── File load ──────────────────────────────────────────────────
@@ -81,31 +120,63 @@ export default function Home() {
     setMeasureInfo({ pointA: null, pointB: null, distance: null });
     setMarkups([]);
     setPendingMarkupPos(null);
-    pendingMeshesRef.current = null;
+    setIs2DPlan(false);
+    setIsSimulating(false);
+    setSimStep(0);
+    pendingMeshesRef.current = [];
+
+    // Clear scene immediately so the user sees a clean state
+    sceneRef.current?.clearMeshes();
 
     try {
       await ifcManager.init();
       setProgress(5);
-      const buffer = await file.arrayBuffer();
-      const meshes = await ifcManager.loadBuffer(buffer, setProgress);
 
-      const scene = sceneRef.current;
-      if (scene) {
-        scene.clearMeshes();
-        scene.addMeshes(meshes);
+      const buffer = await file.arrayBuffer();
+      setProgress(10);
+
+      // Stream meshes from the Web Worker — UI stays responsive
+      await ifcManager.loadBuffer(
+        buffer,
+        (mesh: IFCMeshData) => {
+          const scene = sceneRef.current;
+          if (scene) {
+            scene.queueMesh(mesh);
+          } else {
+            pendingMeshesRef.current.push(mesh);
+          }
+        },
+        (p) => setProgress(Math.max(progress, p)),
+      );
+
+      // Signal Three.js that all meshes have been queued.
+      // If the scene is already ready, call directly; otherwise set the ref
+      // so onSceneReady() will call it when the canvas mounts.
+      if (sceneRef.current) {
+        sceneRef.current.finalizeLoad();
       } else {
-        pendingMeshesRef.current = meshes;
+        loadCompleteRef.current = true;
       }
 
-      setStoreys(ifcManager.getStoreys());
-      setTree(ifcManager.getSpatialTree());
+      // Fetch model metadata from main-thread IFC API (fast, sync)
+      const newStoreys = ifcManager.getStoreys();
+      const newTree    = ifcManager.getSpatialTree();
+
+      setStoreys(newStoreys);
+      setTree(newTree);
       setHasModel(true);
+
+      // Build storey→element map for 2D plan and simulation
+      if (sceneRef.current && newStoreys.length) {
+        const storeyMap = ifcManager.buildStoreyElementMap(newStoreys);
+        sceneRef.current.buildStoreyElementMap(storeyMap);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load IFC file.');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Selection ──────────────────────────────────────────────────
   const handleSelect = useCallback((id: number) => {
@@ -114,17 +185,25 @@ export default function Home() {
     sceneRef.current?.highlight(id);
   }, []);
 
-  // ── Camera ─────────────────────────────────────────────────────
+  const handleFlyTo = useCallback((id: number) => {
+    sceneRef.current?.flyToElement(id);
+    // Also select the element
+    setSelectedID(id);
+    setSelectedProps(ifcManager.getElementProperties(id));
+  }, []);
+
+  // ── View mode ──────────────────────────────────────────────────
   const handleViewMode = useCallback((mode: ViewMode) => {
     setViewMode(mode);
     sceneRef.current?.setViewMode(mode);
   }, []);
 
   const handleHome = useCallback(() => {
+    if (is2DPlan) { sceneRef.current?.exit2DPlan(); setIs2DPlan(false); }
     sceneRef.current?.fitCamera();
     sceneRef.current?.setViewMode('perspective');
     setViewMode('perspective');
-  }, []);
+  }, [is2DPlan]);
 
   const handleFit = useCallback(() => {
     sceneRef.current?.fitCamera();
@@ -133,23 +212,14 @@ export default function Home() {
   // ── Tool mode ──────────────────────────────────────────────────
   const handleTool = useCallback((mode: ToolMode) => {
     setActiveTool(mode);
-    // First-person internally forces perspective camera — keep React state in sync
     if (mode === 'firstPerson') setViewMode('perspective');
     sceneRef.current?.setToolMode(mode);
-
-    // Reset explode when leaving explode mode
     if (mode !== 'explode' && explodeScale !== 0) {
       sceneRef.current?.setExplodeScale(0);
       setExplodeScale(0);
     }
-    // Clear measure when leaving measure mode
-    if (mode !== 'measure') {
-      sceneRef.current?.clearMeasure();
-    }
-    // Cancel pending markup when leaving markup mode
-    if (mode !== 'markup') {
-      setPendingMarkupPos(null);
-    }
+    if (mode !== 'measure') sceneRef.current?.clearMeasure();
+    if (mode !== 'markup') setPendingMarkupPos(null);
   }, [explodeScale]);
 
   // ── Explode ────────────────────────────────────────────────────
@@ -164,39 +234,83 @@ export default function Home() {
     sceneRef.current?.setClipPlane(elevation);
   }, []);
 
-  // Called when section mode drags in the 3D viewport
   const handleSectionChange = useCallback((elevation: number) => {
     setClipElevation(elevation);
   }, []);
 
-  // ── Measure callbacks ──────────────────────────────────────────
+  // ── Measure ────────────────────────────────────────────────────
   const handleMeasureUpdate = useCallback((info: MeasureInfo) => {
     setMeasureInfo(info);
   }, []);
 
-  // ── Markup callbacks ───────────────────────────────────────────
-  const handleMarkupRequest = useCallback((pos: THREE.Vector3, _screen: { x: number; y: number }) => {
+  // ── Markup ─────────────────────────────────────────────────────
+  const handleMarkupRequest = useCallback((pos: THREE.Vector3) => {
     setPendingMarkupPos(pos);
   }, []);
 
   const handleMarkupConfirm = useCallback((text: string) => {
-    if (!pendingMarkupPos) return;
-    const scene = sceneRef.current;
-    if (!scene) return;
-    const item = scene.addMarkup(text, pendingMarkupPos);
+    if (!pendingMarkupPos || !sceneRef.current) return;
+    const item = sceneRef.current.addMarkup(text, pendingMarkupPos);
     setMarkups(prev => [...prev, item]);
     setPendingMarkupPos(null);
   }, [pendingMarkupPos]);
 
-  const handleMarkupCancel = useCallback(() => setPendingMarkupPos(null), []);
-
-  const handleMarkupRemove = useCallback((id: number) => {
+  const handleMarkupCancel  = useCallback(() => setPendingMarkupPos(null), []);
+  const handleMarkupRemove  = useCallback((id: number) => {
     sceneRef.current?.removeMarkup(id);
     setMarkups(prev => prev.filter(m => m.id !== id));
   }, []);
 
+  // ── Graphics settings ──────────────────────────────────────────
+  const handleGfxChange = useCallback((s: GraphicsSettings) => {
+    setGfxSettings(s);
+    sceneRef.current?.applyGraphicsSettings(s);
+  }, []);
+
+  // ── 2D Floor Plan ──────────────────────────────────────────────
+  const handle2DPlan = useCallback((storeyExpressID: number) => {
+    sceneRef.current?.show2DPlan(storeyExpressID, storeys);
+    setIs2DPlan(true);
+    setViewMode('top');
+  }, [storeys]);
+
+  const handleExit2DPlan = useCallback(() => {
+    sceneRef.current?.exit2DPlan();
+    setIs2DPlan(false);
+    setViewMode('perspective');
+  }, []);
+
+  // ── Construction simulation ────────────────────────────────────
+  const handleStartSimulation = useCallback(() => {
+    if (!storeys.length) return;
+    setIsSimulating(true);
+    setSimStep(0);
+    setSimTotal(storeys.length);
+    setSimStoreyName('');
+
+    sceneRef.current?.startSimulation(
+      storeys,
+      (step, total, name) => {
+        setSimStep(step);
+        setSimTotal(total);
+        setSimStoreyName(name);
+      },
+      () => {
+        setIsSimulating(false);
+        setSimStep(storeys.length);
+      },
+      1800,
+    );
+  }, [storeys]);
+
+  const handleStopSimulation = useCallback(() => {
+    sceneRef.current?.stopSimulation();
+    setIsSimulating(false);
+    setSimStep(0);
+  }, []);
+
   // ── Open file dialog ───────────────────────────────────────────
-  const handleOpenFile = () => {
+  const handleOpenFile = useCallback(() => {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.ifc';
@@ -205,9 +319,12 @@ export default function Home() {
       if (file) loadFile(file);
     };
     input.click();
-  };
+  }, [loadFile]);
 
-  // ── Drop zone (pre-load) ───────────────────────────────────────
+  // ── FPS callback ───────────────────────────────────────────────
+  const handleFpsUpdate = useCallback((f: number) => setFps(f), []);
+
+  // ── Pre-load screen ────────────────────────────────────────────
   if (!hasModel && !loading) {
     return <DropZone onFile={loadFile} loading={loading} progress={progress} error={error} />;
   }
@@ -234,12 +351,17 @@ export default function Home() {
 
         {/* Left: Model tree */}
         {showTree && (
-          <div className="w-56 shrink-0 bg-[#161b22] border-r border-slate-800 overflow-hidden flex flex-col">
-            <ModelTree tree={tree} selectedID={selectedID} onSelect={handleSelect} />
+          <div className="w-60 shrink-0 bg-[#161b22] border-r border-slate-800 overflow-hidden flex flex-col">
+            <ModelTree
+              tree={tree}
+              selectedID={selectedID}
+              onSelect={handleSelect}
+              onFlyTo={handleFlyTo}
+            />
           </div>
         )}
 
-        {/* Center: 3D canvas + overlay */}
+        {/* Center: 3D canvas + overlays */}
         <div className="flex-1 relative min-w-0">
 
           {/* Loading overlay */}
@@ -248,13 +370,18 @@ export default function Home() {
               <div className="w-10 h-10 rounded-full border-4 border-slate-700 border-t-blue-500 animate-spin" />
               <div className="text-center">
                 <p className="text-white text-sm font-medium mb-2">Loading model…</p>
-                <div className="w-40 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                <div className="w-48 h-1.5 bg-slate-700 rounded-full overflow-hidden">
                   <div
-                    className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                    className="h-full bg-blue-500 rounded-full transition-all duration-150"
                     style={{ width: `${progress}%` }}
                   />
                 </div>
-                <p className="text-slate-500 text-xs mt-2">{progress.toFixed(0)}%</p>
+                <p className="text-slate-400 text-xs mt-1.5">{progress.toFixed(0)}%</p>
+                {progress >= 15 && progress < 100 && (
+                  <p className="text-slate-600 text-[10px] mt-1">
+                    Parsing geometry in background…
+                  </p>
+                )}
               </div>
             </div>
           )}
@@ -266,6 +393,7 @@ export default function Home() {
             onMeasureUpdate={handleMeasureUpdate}
             onMarkupRequest={handleMarkupRequest}
             onSectionChange={handleSectionChange}
+            onFpsUpdate={handleFpsUpdate}
           />
 
           {/* Scene HTML overlay (measure labels, markup pins, hints) */}
@@ -280,33 +408,81 @@ export default function Home() {
             activeTool={activeTool}
           />
 
-          {/* View mode badge */}
-          <div className="absolute top-3 right-3 pointer-events-none z-10">
-            <div className="px-2 py-1 bg-[#161b22]/90 border border-slate-800 rounded text-[10px] text-slate-500 font-mono">
-              {viewMode.toUpperCase()} · {activeTool.toUpperCase()}
+          {/* ── Top-right HUD ── */}
+          <div className="absolute top-3 right-3 z-20 flex flex-col items-end gap-2">
+            {/* View mode badge + settings button */}
+            <div className="flex items-center gap-2">
+              <div className="px-2 py-1 bg-[#161b22]/90 border border-slate-800 rounded text-[10px] text-slate-500 font-mono pointer-events-none">
+                {viewMode.toUpperCase()} · {activeTool.toUpperCase()}
+              </div>
+              {/* FPS toggle */}
+              <button
+                onClick={() => setShowFps(p => !p)}
+                title="Toggle FPS counter"
+                className={`px-2 py-1 text-[10px] rounded border transition-colors ${
+                  showFps
+                    ? 'border-green-700 text-green-400 bg-green-950/30'
+                    : 'border-slate-700 text-slate-500 bg-[#161b22]/90 hover:text-white'
+                }`}
+              >
+                FPS
+              </button>
+              {/* Graphics settings toggle */}
+              <button
+                onClick={() => setShowGfxSettings(p => !p)}
+                title="Graphics settings"
+                className={`px-2 py-1 text-[10px] rounded border transition-colors ${
+                  showGfxSettings
+                    ? 'border-blue-700 text-blue-400 bg-blue-950/30'
+                    : 'border-slate-700 text-slate-500 bg-[#161b22]/90 hover:text-white'
+                }`}
+              >
+                ⚙ GFX
+              </button>
             </div>
+
+            {/* FPS counter */}
+            {showFps && <FpsCounter fps={fps} visible={showFps} />}
           </div>
 
-          {/* Tree toggle */}
-          <button
-            onClick={() => setShowTree(p => !p)}
-            className="absolute top-3 left-3 z-10 px-2 py-1 bg-[#161b22]/90 border border-slate-800 rounded text-[10px] text-slate-400 hover:text-white transition-colors"
-          >
-            {showTree ? '◀ Tree' : '▶ Tree'}
-          </button>
+          {/* Graphics settings panel */}
+          {showGfxSettings && (
+            <GraphicsSettingsPanel
+              settings={gfxSettings}
+              fps={fps}
+              onChange={handleGfxChange}
+              onClose={() => setShowGfxSettings(false)}
+            />
+          )}
 
-          {/* Timer toggle */}
+          {/* ── Top-left controls ── */}
+          <div className="absolute top-3 left-3 z-10 flex gap-2">
+            <button
+              onClick={() => setShowTree(p => !p)}
+              className="px-2 py-1 bg-[#161b22]/90 border border-slate-800 rounded text-[10px] text-slate-400 hover:text-white transition-colors"
+            >
+              {showTree ? '◀ Tree' : '▶ Tree'}
+            </button>
+            {is2DPlan && (
+              <button
+                onClick={handleExit2DPlan}
+                className="px-2 py-1 bg-blue-900/40 border border-blue-800 rounded text-[10px] text-blue-400 hover:text-blue-200 transition-colors"
+              >
+                📐 Exit 2D Plan
+              </button>
+            )}
+          </div>
+
+          {/* ── Bottom-right controls ── */}
           <button
             onClick={() => setShowTimer(p => !p)}
             className="absolute bottom-4 right-3 z-10 px-2 py-1 bg-[#161b22]/90 border border-slate-800 rounded text-[10px] text-slate-400 hover:text-white transition-colors"
           >
             ⏱ Timer
           </button>
-
-          {/* Project timer widget */}
           {showTimer && <ProjectTimer />}
 
-          {/* Measure result panel */}
+          {/* Measure result */}
           {measureInfo.distance !== null && (
             <div className="absolute bottom-12 left-1/2 -translate-x-1/2 z-10 pointer-events-auto">
               <div className="bg-[#161b22] border border-amber-500/40 rounded-lg px-4 py-2 flex items-center gap-4 shadow-xl">
@@ -317,11 +493,21 @@ export default function Home() {
                   </div>
                 </div>
                 <button
-                  onClick={() => { sceneRef.current?.clearMeasure(); }}
-                  className="text-[10px] text-slate-500 hover:text-white transition-colors border border-slate-700 px-2 py-1 rounded"
+                  onClick={() => sceneRef.current?.clearMeasure()}
+                  className="text-[10px] text-slate-500 hover:text-white border border-slate-700 px-2 py-1 rounded"
                 >
                   Clear
                 </button>
+              </div>
+            </div>
+          )}
+
+          {/* Selected element highlight pulse indicator */}
+          {selectedID >= 0 && !loading && (
+            <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
+              <div className="px-3 py-1 bg-blue-900/40 border border-blue-800/50 rounded-full text-[10px] text-blue-400 font-mono">
+                Selected: #{selectedID}
+                {selectedProps?.name && selectedProps.name !== 'Unnamed' && ` — ${selectedProps.name}`}
               </div>
             </div>
           )}
@@ -336,11 +522,20 @@ export default function Home() {
         </div>
       </div>
 
-      {/* ── Storey panel ── */}
+      {/* ── Storey / simulation panel ── */}
       <StoreyPanel
         storeys={storeys}
         clipElevation={clipElevation}
         onClipChange={handleClip}
+        is2DPlan={is2DPlan}
+        on2DPlan={handle2DPlan}
+        onExit2DPlan={handleExit2DPlan}
+        isSimulating={isSimulating}
+        simStep={simStep}
+        simTotal={simTotal}
+        simStoreyName={simStoreyName}
+        onStartSimulation={handleStartSimulation}
+        onStopSimulation={handleStopSimulation}
       />
     </div>
   );

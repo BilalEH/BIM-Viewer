@@ -1,1 +1,2 @@
-- [web-ifc 0.0.77 API quirks](web-ifc-api.md) — Dispose() is global teardown; correct geometry/storey API names differ from docs
+- [web-ifc 0.0.77 API quirks](web-ifc-api.md) — Dispose() is global teardown; IFCRELCONTAINEDINSPATIALSTRUCTURE needs all-relation scan not first-match
+- [IFC Viewer architecture decisions](ifc-viewer-arch.md) — Web Worker + dual-WASM pattern, requestIdleCallback queue, 2D plan, simulation, selection highlight ownership

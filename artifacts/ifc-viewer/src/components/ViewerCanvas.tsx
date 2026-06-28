@@ -9,6 +9,7 @@ interface ViewerCanvasProps {
   onMeasureUpdate?: (info: MeasureInfo) => void;
   onMarkupRequest?: (pos: THREE.Vector3, screen: { x: number; y: number }) => void;
   onSectionChange?: (elevation: number) => void;
+  onFpsUpdate?: (fps: number) => void;
 }
 
 export function ViewerCanvas({
@@ -18,6 +19,7 @@ export function ViewerCanvas({
   onMeasureUpdate,
   onMarkupRequest,
   onSectionChange,
+  onFpsUpdate,
 }: ViewerCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -27,7 +29,7 @@ export function ViewerCanvas({
 
     import('@/lib/three-scene').then(({ ThreeScene }) => {
       const scene = new ThreeScene();
-      scene.init(canvas, onSelect, onMeasureUpdate, onMarkupRequest, onSectionChange);
+      scene.init(canvas, onSelect, onMeasureUpdate, onMarkupRequest, onSectionChange, onFpsUpdate);
       sceneRef.current = scene;
       onSceneReady(scene);
     });

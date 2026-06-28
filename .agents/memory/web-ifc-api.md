@@ -11,7 +11,8 @@ description: Critical non-obvious behaviors of web-ifc 0.0.77 that differ from o
 - Line properties: `api.GetLine(modelID, expressID)` returns an object where string values are wrapped: `line.Name.value`, `line.GlobalId.value`, `line.Elevation.value`.
 - Type name from code: `api.GetNameFromTypeCode(api.GetLineType(modelID, expressID))`.
 - WASM file must be served at the app's base URL root. Set with `api.SetWasmPath(import.meta.env.BASE_URL)`.
+- **`IFCRELCONTAINEDINSPATIALSTRUCTURE`**: a storey can appear in MULTIPLE relation objects. Always accumulate all matches — never return on first match or elements will be silently dropped.
 
-**Why:** The Dispose() misuse terminated WASM mid-parse on first load; the GetRawFileVerts misuse would have thrown at runtime.
+**Why:** The Dispose() misuse terminated WASM mid-parse on first load; the GetRawFileVerts misuse would have thrown at runtime. The multi-relation issue causes incomplete storey element maps which breaks 2D plan and construction simulation.
 
 **How to apply:** Any time web-ifc is used in this project, follow these exact API calls. If web-ifc is upgraded, re-verify these names against the new package's prototype methods.
