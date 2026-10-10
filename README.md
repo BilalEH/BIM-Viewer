@@ -489,3 +489,5 @@ pnpm --filter @workspace/ifc-viewer run typecheck
 pnpm --filter @workspace/ifc-viewer run build
 # → output in artifacts/ifc-viewer/dist/ (deploy this folder to any static host)
 ```
+
+10-2026
